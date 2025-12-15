@@ -1,0 +1,143 @@
+// src/services/recorder/index.js
+import { PassThrough } from 'stream';
+import { S3Client } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import interleave from 'interleave-stream';
+import alawmulaw from 'alawmulaw';
+import { logger } from '../../utils/logger.js';
+
+export class AudioRecorderService {
+    constructor(config) {
+        this.config = config;
+        this.s3Client = new S3Client({
+            region: config.aws.region
+        });
+        this.resetStreams();
+        this.sampleRate = 8000;
+        this.numChannels = 2;
+    }
+
+    resetStreams() {
+        this.callerStream = new PassThrough();
+        this.agentStream = new PassThrough();
+        this.combinedStream = new PassThrough();
+        this.isRecording = false;
+        this.callId = null;
+    }
+
+    writeWavHeader() {
+        const headerBuffer = Buffer.alloc(44);
+        headerBuffer.write('RIFF', 0);
+        headerBuffer.writeUInt32LE(0, 4);
+        headerBuffer.write('WAVE', 8);
+        headerBuffer.write('fmt ', 12);
+        headerBuffer.writeUInt32LE(16, 16);
+        headerBuffer.writeUInt16LE(1, 20);
+        headerBuffer.writeUInt16LE(this.numChannels, 22);
+        headerBuffer.writeUInt32LE(this.sampleRate, 24);
+        headerBuffer.writeUInt32LE(this.sampleRate * this.numChannels * 2, 28);
+        headerBuffer.writeUInt16LE(this.numChannels * 2, 32);
+        headerBuffer.writeUInt16LE(16, 34);
+        headerBuffer.write('data', 36);
+        headerBuffer.writeUInt32LE(0, 40);
+        return headerBuffer;
+    }
+
+    startRecording(callId) {
+        if (this.isRecording) {
+            logger.warn({ callId }, 'Recording already in progress');
+            return;
+        }
+
+        this.isRecording = true;
+        this.callId = callId;
+        
+        // Write WAV header
+        this.combinedStream.write(this.writeWavHeader());
+        
+        // Setup stream pipeline
+        interleave([this.callerStream, this.agentStream]).pipe(this.combinedStream);
+        
+        logger.info({ callId }, 'Started WAV recording');
+    }
+
+    writeCallerAudio(chunk) {
+        if (!this.isRecording || !chunk) return;
+
+        try {
+            const muLawData = Buffer.from(chunk, 'base64');
+            const pcmData = alawmulaw.mulaw.decode(new Uint8Array(muLawData));
+            this.callerStream.write(Buffer.from(pcmData.buffer));
+        } catch (error) {
+            logger.error({ error, callId: this.callId }, 'Error writing caller audio');
+        }
+    }
+
+    writeAgentAudio(chunk) {
+        if (!this.isRecording || !chunk) return;
+
+        try {
+            const muLawData = Buffer.from(chunk, 'base64');
+            const pcmData = alawmulaw.mulaw.decode(new Uint8Array(muLawData));
+            this.agentStream.write(Buffer.from(pcmData.buffer));
+        } catch (error) {
+            logger.error({ error, callId: this.callId }, 'Error writing agent audio');
+        }
+    }
+
+    async stopRecording() {
+        if (!this.isRecording) return;
+
+        try {
+            this.isRecording = false;
+            
+            // End all streams
+            this.callerStream.end();
+            this.agentStream.end();
+            this.combinedStream.end();
+
+            // Upload to S3
+            await this.uploadToS3();
+            
+            logger.info({ callId: this.callId }, 'Recording stopped and uploaded');
+        } catch (error) {
+            logger.error({ error, callId: this.callId }, 'Error stopping recording');
+        } finally {
+            this.resetStreams();
+        }
+    }
+
+    async uploadToS3() {
+        const key = `calls/${this.callId}/${Date.now()}.wav`;
+        
+        try {
+            const upload = new Upload({
+                client: this.s3Client,
+                params: {
+                    Bucket: this.config.s3.audioBucket,
+                    Key: key,
+                    Body: this.combinedStream,
+                    ContentType: 'audio/wav'
+                }
+            });
+
+            await upload.done();
+            logger.info({ callId: this.callId, key }, 'Recording uploaded to S3');
+            
+        } catch (error) {
+            logger.error({ error, callId: this.callId }, 'Failed to upload recording to S3');
+            throw error;
+        }
+    }
+
+    cleanup() {
+        try {
+            if (this.isRecording) {
+                this.stopRecording();
+            }
+            this.resetStreams();
+        } catch (error) {
+            logger.error({ error }, 'Error during recorder cleanup');
+        }
+    }
+}

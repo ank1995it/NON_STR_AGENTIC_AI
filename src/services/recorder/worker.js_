@@ -1,0 +1,211 @@
+import { parentPort } from 'worker_threads';
+import { PassThrough } from 'stream';
+import { S3Client } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import alawmulaw from 'alawmulaw';
+import fs from 'fs';
+import path from 'path';
+
+class RecordingWorker {
+    constructor() {
+        this.callerStream = new PassThrough();
+        this.isRecording = false;
+        this.config = null;
+        this.callId = null;
+        this.s3Client = null;
+        this.sampleRate = 8000;
+        this.numChannels = 1;  // Mono for caller audio
+        this.audioLength = 0;
+
+        this.setupMessageHandler();
+    }
+
+    setupMessageHandler() {
+        parentPort.on('message', async (message) => {
+            try {
+                switch (message.type) {
+                    case 'init':
+                        this.initializeWorker(message.config);
+                        break;
+                    case 'start':
+                        this.startRecording(message.callId);
+                        break;
+                    case 'callerAudio':
+                        this.writeCallerAudio(message.chunk);
+                        break;
+                    case 'stop':
+                        await this.stopRecording();
+                        break;
+                }
+            } catch (error) {
+                console.error('Error in message handler:', error);
+                parentPort.postMessage({ 
+                    type: 'error', 
+                    error: error.message 
+                });
+            }
+        });
+    }
+
+    initializeWorker(config) {
+        this.config = config;
+        this.s3Client = new S3Client({
+            region: config.aws.region
+        });
+        parentPort.postMessage({ type: 'initialized' });
+    }
+
+    writeWavHeader(length = 0) {
+        const buffer = Buffer.alloc(44);
+        const outNumChannels = this.numChannels;
+        const outSampleRate = this.sampleRate;
+        const bitDepth = 16;
+        const bytesPerSample = bitDepth / 8;
+
+        buffer.writeUInt32BE(1380533830, 0);                                      // RIFF identifier
+        buffer.writeUInt32LE(36 + length, 4);                                     // file length
+        buffer.writeUInt32BE(1463899717, 8);                                      // RIFF type 'WAVE'
+        buffer.writeUInt32BE(1718449184, 12);                                     // format chunk identifier 'fmt '
+        buffer.writeUInt32LE(16, 16);                                             // format chunk length
+        buffer.writeUInt16LE(1, 20);                                              // sample format (raw)
+        buffer.writeUInt16LE(outNumChannels, 22);                                 // channel count
+        buffer.writeUInt32LE(outSampleRate, 24);                                  // sample rate
+        buffer.writeUInt32LE(outSampleRate * bytesPerSample * outNumChannels, 28);// byte rate
+        buffer.writeUInt16LE(bytesPerSample * outNumChannels, 32);                // block align
+        buffer.writeUInt16LE(bitDepth, 34);                                       // bits per sample
+        buffer.writeUInt32BE(1684108385, 36);                                     // data chunk identifier 'data'
+        buffer.writeUInt32LE(length, 40);                                         // data length
+
+        return buffer;
+    }
+
+    startRecording(callId) {
+        this.isRecording = true;
+        this.callId = callId;
+        this.audioLength = 0;
+        parentPort.postMessage({ type: 'recordingStarted', callId });
+        console.log('Started recording for call:', callId);
+    }
+
+    writeCallerAudio(chunk) {
+        if (!this.isRecording || !chunk) return;
+
+        try {
+            const muLawData = Buffer.from(chunk, 'base64');
+            const pcmData = alawmulaw.mulaw.decode(new Uint8Array(muLawData));
+            const pcmBuffer = Buffer.from(pcmData.buffer);
+            
+            this.callerStream.write(pcmBuffer);
+            this.audioLength += pcmBuffer.length;
+        } catch (error) {
+            console.error('Error processing caller audio:', error);
+        }
+    }
+
+    async saveToLocal() {
+        const timestamp = Date.now();
+        const filename = `${this.callId}_${timestamp}.wav`;
+        const recordingsDir = './recordings';
+        
+        try {
+            if (!fs.existsSync(recordingsDir)) {
+                fs.mkdirSync(recordingsDir, { recursive: true });
+            }
+
+            const filePath = path.join(recordingsDir, filename);
+            const fileStream = fs.createWriteStream(filePath);
+
+            return new Promise((resolve, reject) => {
+                // Write WAV header
+                const header = this.writeWavHeader(this.audioLength);
+                fileStream.write(header);
+
+                // Pipe caller stream directly to file
+                this.callerStream.pipe(fileStream);
+
+                this.callerStream.on('end', () => {
+                    fileStream.end();
+                    console.log(`Saved file: ${filePath}, size: ${this.audioLength + 44} bytes`);
+                    parentPort.postMessage({ 
+                        type: 'saveComplete', 
+                        callId: this.callId, 
+                        filePath,
+                        fileSize: this.audioLength + 44
+                    });
+                    resolve(filePath);
+                });
+
+                fileStream.on('error', (error) => {
+                    console.error('File write error:', error);
+                    reject(error);
+                });
+            });
+
+        } catch (error) {
+            console.error('Local save error:', error);
+            parentPort.postMessage({ 
+                type: 'error', 
+                error: error.message, 
+                callId: this.callId 
+            });
+            throw error;
+        }
+    }
+
+    async uploadToS3() {
+        const key = `calls/${this.callId}/${Date.now()}.wav`;
+        
+        try {
+            const upload = new Upload({
+                client: this.s3Client,
+                params: {
+                    Bucket: this.config.s3.audioBucket,
+                    Key: key,
+                    Body: this.callerStream,
+                    ContentType: 'audio/wav'
+                },
+                queueSize: 1,
+                partSize: 5 * 1024 * 1024
+            });
+
+            await upload.done();
+            
+            parentPort.postMessage({ 
+                type: 'uploadComplete', 
+                callId: this.callId, 
+                key 
+            });
+        } catch (error) {
+            console.error('Upload error:', error);
+            parentPort.postMessage({ 
+                type: 'error', 
+                error: error.message,
+                callId: this.callId 
+            });
+        }
+    }
+
+    async stopRecording() {
+        if (!this.isRecording) return;
+
+        try {
+            this.isRecording = false;
+            this.callerStream.end();
+
+            await this.saveToLocal();
+            
+            parentPort.postMessage({ 
+                type: 'recordingStopped', 
+                callId: this.callId 
+            });
+        } catch (error) {
+            parentPort.postMessage({ 
+                type: 'error', 
+                error: error.message, 
+                callId: this.callId 
+            });
+        }
+    }
+}
+
+new RecordingWorker();

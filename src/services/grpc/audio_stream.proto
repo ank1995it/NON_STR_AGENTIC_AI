@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+service AudioStreamService {
+  rpc StreamAudio(stream AudioChunk) returns (ProcessingResponse) {}
+}
+
+message AudioChunk {
+  bytes audio_data = 1;
+  string stream_id = 2;
+  int64 timestamp = 3;
+  string call_id = 4;
+}
+
+message ProcessingResponse {
+  string status = 1;
+  int32 frames_processed = 2;
+  string message = 3;
+}
+ 
