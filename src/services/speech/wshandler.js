@@ -18,6 +18,11 @@ export class WebSocketHandler {
     this.logger = logger.child({service: 'WebSocketHandler'})
     this.socket = socket;
     this.speechManager = speechManager;
+    // __define-ocg__ Service Bus guards
+this.callStartedEventSent = false;
+this.callConnectedEventSent = false;
+this.callEndedEventSent = false;
+
     this.services = services;
     this.setupEventHandlers();
     this.lastResponseStartTime = null;
@@ -70,6 +75,36 @@ export class WebSocketHandler {
 
      this.logger.info("WebSocketHandler initialized");
   }
+
+  // __define-ocg__ Publish event to Azure Service Bus
+async publishEvent(eventType, payload = {}) {
+  try {
+    await ServiceBusManager.send(
+      Topics.CALL_EVENTS,
+      {
+        eventType,
+        callId: this.callId,
+        timestamp: new Date().toISOString(),
+        ...payload
+      },
+      {
+        messageId: `${this.callId}-${eventType}`,
+        applicationProperties: {
+          callId: this.callId,
+          eventType
+        }
+      }
+    );
+
+    this.logger.info({ eventType }, "Service Bus event published");
+  } catch (err) {
+    this.logger.error(
+      { err: err.message, eventType },
+      "Failed to publish Service Bus event"
+    );
+  }
+}
+
 
   getTimestamp() {
     return new Date().toISOString().split("T")[1].slice(0, -1);
@@ -180,6 +215,20 @@ export class WebSocketHandler {
           callSid,
         });
       };
+
+      // __define-ocg__ CALL_STARTED event
+if (!this.callStartedEventSent) {
+  await this.publishEvent("CALL_STARTED", {
+    provider: "twilio",
+    direction: msg.start?.direction || "inbound",
+    from: msg.start?.from,
+    to: msg.start?.to,
+    streamSid: msg.start?.streamSid
+  });
+
+  this.callStartedEventSent = true;
+}
+
 
       // Event handler for when a speech segment has ended
       recognizer.speechEndDetected = (_, event) => {
@@ -486,6 +535,13 @@ export class WebSocketHandler {
     //     console.warn(`[${this.getTimestamp()}] Received media before stream start`);
     //     //return;
     // }
+    if (!this.callConnectedEventSent && msg?.media?.payload) {
+      this.publishEvent("CALL_CONNECTED", {
+        streamSid: this.speechManager.state.streamSid
+      });
+  
+      this.callConnectedEventSent = true;
+    }
 
     // Record caller audio
     if (msg.media?.payload && !this.isAgentRecorderInterrupted) {
@@ -541,6 +597,15 @@ export class WebSocketHandler {
 
   async cleanup() {
     // Close Event Hub client if call is ending
+    // __define-ocg__ CALL_ENDED event
+if (!this.callEndedEventSent) {
+  await this.publishEvent("CALL_ENDED", {
+    reason: "call_terminated"
+  });
+
+  this.callEndedEventSent = true;
+}
+
     if (this.callEnding && this.eventHubClient) {
       await this.eventHubClient.close();
     }

@@ -8,6 +8,7 @@ import { config } from './config/index.js';
 import { setupSecurity } from './middleware/security.js';
 import { logger } from './utils/logger.js';
 import { setupRoutes } from './routes/index.js';
+import ServiceBusManager from "./utils/serviceBusManager.js";
 
 const app = Fastify({
     logger,
@@ -34,7 +35,7 @@ async function startServer() {
             port: config.server.port,
             host: config.server.host
         });
-
+        ServiceBusManager.init(process.env.SERVICE_BUS_CONNECTION_STRING);
         logger.info(`Server listening on ${config.server.host}:${config.server.port}`);
     } catch (error) {
         logger.error('Error starting server:', error);
