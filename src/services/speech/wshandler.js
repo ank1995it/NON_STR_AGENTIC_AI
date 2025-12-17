@@ -23,6 +23,11 @@ this.callStartedEventSent = false;
 this.callConnectedEventSent = false;
 this.callEndedEventSent = false;
 
+// __define-ocg__ Transcript tracking
+this.turnCounter = 0;
+this.lastUserUtterance = null;
+
+
     this.services = services;
     this.setupEventHandlers();
     this.lastResponseStartTime = null;
@@ -236,7 +241,7 @@ if (!this.callStartedEventSent) {
       };
 
       // Set up Azure recognition events
-      recognizer.recognized = (_, event) => {
+      recognizer.recognized =async (_, event) => {
         //console.log(event.result.reason);
         //console.log(sdk.ResultReason.RecognizedSpeech);
         const endTime = performance.now();
@@ -259,6 +264,16 @@ if (!this.callStartedEventSent) {
           if (true) {
             // if(this.audioStreamer)  this.audioStreamer.stop();
             this.isRecognizing = false; // added on 29-03-25
+            // __define-ocg__ USER_SPOKE event
+if (text && text.trim().length > 0) {
+  this.lastUserUtterance = text;
+
+  await this.publishTranscriptEvent("USER_SPOKE", text, {
+    confidence: event.result.confidence,
+    locale: event.result.language
+  });
+}
+
             this.speechManager.handleTranscript(text, false);
             this.isMethodCalledOnce = false; // Reset method call tracker
           }
@@ -371,6 +386,12 @@ if (!this.callStartedEventSent) {
   async generateAndStreamTTS(response) {
     try {
        this.logger.info({ response }, "Starting TTS generation");
+       // __define-ocg__ AGENT_SPOKE event
+await this.publishTranscriptEvent("AGENT_SPOKE", response, {
+  interrupted: this.isSendInterruption,
+  basedOn: this.lastUserUtterance
+});
+
       this.speechManager.startTTS();
       this.isTTSInterrupted = false;
       this.markQueue = [];
@@ -616,4 +637,42 @@ if (!this.callEndedEventSent) {
     this.speechManager.cleanup();
     await this.services.cleanup?.();
   }
+
+// __define-ocg__ Publish transcript events
+async publishTranscriptEvent(eventType, text, extra = {}) {
+  try {
+    const turnId = ++this.turnCounter;
+
+    await ServiceBusManager.send(
+      Topics.CALL_TRANSCRIPTS,
+      {
+        eventType,
+        callId: this.callId,
+        turnId,
+        text,
+        timestamp: new Date().toISOString(),
+        ...extra
+      },
+      {
+        messageId: `${this.callId}-${eventType}-${turnId}`,
+        applicationProperties: {
+          callId: this.callId,
+          eventType,
+          turnId
+        }
+      }
+    );
+
+    this.logger.info(
+      { eventType, turnId },
+      "Transcript event published"
+    );
+  } catch (err) {
+    this.logger.error(
+      { err: err.message, eventType },
+      "Failed to publish transcript event"
+    );
+  }
+}
+
 }
