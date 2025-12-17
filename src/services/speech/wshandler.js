@@ -27,6 +27,12 @@ this.callEndedEventSent = false;
 this.turnCounter = 0;
 this.lastUserUtterance = null;
 
+// __define-ocg__ Post-call tracking
+this.callStartTime = Date.now();
+this.callEndTime = null;
+this.postCallEventSent = false;
+
+
 
     this.services = services;
     this.setupEventHandlers();
@@ -636,6 +642,9 @@ if (!this.callEndedEventSent) {
     this.silenceDetector.cleanup();
     this.speechManager.cleanup();
     await this.services.cleanup?.();
+    // __define-ocg__ Emit post-call integration event
+    await this.publishPostCallEvent("completed");
+
   }
 
 // __define-ocg__ Publish transcript events
@@ -675,4 +684,46 @@ async publishTranscriptEvent(eventType, text, extra = {}) {
   }
 }
 
+// __define-ocg__ Publish post-call integration event
+async publishPostCallEvent(status) {
+  if (this.postCallEventSent) return;
+
+  this.callEndTime = Date.now();
+  this.postCallEventSent = true;
+
+  const payload = {
+    eventType: "POST_CALL_READY",
+    callId: this.callId,
+    provider: "twilio",
+    status,
+    startedAt: new Date(this.callStartTime).toISOString(),
+    endedAt: new Date(this.callEndTime).toISOString(),
+    durationMs: this.callEndTime - this.callStartTime,
+    turnCount: this.turnCounter,
+    timestamp: new Date().toISOString()
+  };
+
+  try {
+    await ServiceBusManager.send(
+      Topics.POST_CALL,
+      payload,
+      {
+        messageId: `${this.callId}-POST_CALL_READY`,
+        applicationProperties: {
+          callId: this.callId,
+          eventType: payload.eventType
+        }
+      }
+    );
+    this.logger.info("Post-call event published");
+  } catch (err) {
+    this.logger.error(
+      { err: err.message },
+      "Failed to publish post-call event"
+    );
+  }
 }
+
+
+}
+
