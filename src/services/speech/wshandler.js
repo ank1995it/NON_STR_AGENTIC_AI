@@ -7,9 +7,8 @@ import { TwiMLTTSService } from "../tts/twiml.js";
 import { TwilioAudioStreamer } from "../background/index.js";
 import AsyncLock from "async-lock";
 import { performance } from "node:perf_hooks";
-import { error } from "node:console";
 import {CallStreamManager} from "../grpc/grpc-client.js"
-import ServiceBusManager from "../../utils/serviceBusManager.js";
+import { CallEventPublisher } from "../serviceBusEvents/callEventPublisher.js";
 export class WebSocketHandler {
   constructor(socket, speechManager, services, callId, llmUrl, logger) {
     this.llmUrl = llmUrl;
@@ -38,9 +37,9 @@ export class WebSocketHandler {
     this.callStartedEventSent = false;
     this.callConnectedEventSent = false;
     this.callEndedEventSent = false;
-    this.turnCounter = 0;
     this.lastUserUtterance = null;
     this.postCallEventSent = false;
+    this.eventPublisher = new CallEventPublisher(callId, this.logger);
     // Mark and Clear event handling properties
     this.markQueue = [];
 
@@ -169,15 +168,15 @@ export class WebSocketHandler {
        this.logger.info(Object.keys(this.services))
 
        if (!this.callStartedEventSent) {
-         await this.publishEvent("CALL_STARTED", {
-           provider: "twilio",
-           direction: msg.start?.direction || "inbound",
-           from: msg.start?.from,
-           to: msg.start?.to,
-           streamSid: msg.start?.streamSid,
-         });
-
-         this.callStartedEventSent = true;
+        await this.eventPublisher.publishCallEvent("CALL_STARTED", {
+          provider: "twilio",
+          direction: msg.start?.direction || "inbound",
+          from: msg.start?.from,
+          to: msg.start?.to,
+          streamSid: msg.start?.streamSid
+        });
+      
+        this.callStartedEventSent = true;
        }
 
       const audioStream = this.services.audioTransformer.createReadableStream();
@@ -227,11 +226,12 @@ export class WebSocketHandler {
             if (text && text.trim().length > 0) {
               this.lastUserUtterance = text;
 
-              await this.publishTranscriptEvent("USER_SPOKE", text, {
+              await this.eventPublisher.publishTranscript("USER_SPOKE", text, {
                 confidence: event.result.confidence,
                 locale: event.result.language,
-                speaker: 'user'
+                speaker: "user"
               });
+              
             }
             this.speechManager.handleTranscript(text, false);
             this.isMethodCalledOnce = false; // Reset method call tracker
@@ -339,11 +339,11 @@ export class WebSocketHandler {
   async generateAndStreamTTS(response) {
     try {
        this.logger.info({ response }, "Starting TTS generation");
-       await this.publishTranscriptEvent("AIAGENT_SPOKE", response, {
-         interrupted: this.isSendInterruption,
-         basedOn: this.lastUserUtterance,
-         speaker : "ai_agent"
-       });
+       await this.eventPublisher.publishTranscript("AIAGENT_SPOKE", response, {
+        interrupted: this.isSendInterruption,
+        basedOn: this.lastUserUtterance,
+        speaker: "ai_agent"
+      });
       this.speechManager.startTTS();
       this.isTTSInterrupted = false;
       this.markQueue = [];
@@ -505,7 +505,7 @@ export class WebSocketHandler {
     });
   }
 
-  handleMedia(msg) {
+  async handleMedia(msg) {
     // if (!this.speechManager.isStreaming()) {
     //     console.warn(`[${this.getTimestamp()}] Received media before stream start`);
     //     //return;
@@ -514,13 +514,13 @@ export class WebSocketHandler {
     // Record caller audio
 
     if (!this.callConnectedEventSent && msg?.media?.payload) {
-      this.publishEvent("CALL_CONNECTED", {
+      await this.eventPublisher.publishCallEvent("CALL_CONNECTED", {
         streamSid: this.speechManager.state.streamSid
       });
-
+    
       this.callConnectedEventSent = true;
     }
-
+    
     if (msg.media?.payload && !this.isAgentRecorderInterrupted) {
       //this.services.audioRecorder.writeCallerAudio(Buffer.from(msg.media.payload, 'base64'));
     }
@@ -562,6 +562,17 @@ export class WebSocketHandler {
     }
   }
 
+  async publishPostCallEvent() {
+  await this.eventPublisher.publishPostCallSummary({
+    durationSec: "To be calculated: 900 sec",
+    direction: "inbound",
+    summary: "Customer requested order cancellation",
+    sentiment: "neutral",
+    intent: "order_cancellation",
+    recordingUrl: "https://storage.blob.core.windows.net/recordings/1234.wav"
+  });
+}
+
   async handleClose() {
     console.log(`[${this.getTimestamp()}] WebSocket connection closed`);
     await this.cleanup();
@@ -579,127 +590,21 @@ export class WebSocketHandler {
     }
 
     if (!this.callEndedEventSent) {
-      await this.publishEvent("CALL_ENDED", {
-        reason: "call_terminated",
+      await this.eventPublisher.publishCallEvent("CALL_ENDED", {
+        reason: "call_terminated"
       });
-
+    
       this.callEndedEventSent = true;
     }
+    
 
     this.callStreamManager.close()
     this.audioStreamer = null;//due to distortioncommented on 27-03-25
     this.silenceDetector.cleanup();
     await this.services.transcribeService.stopStream();
     this.speechManager.cleanup();
-    if(!this.postCallEventSent){
-      await this.publishPostCallEvent()
-    }
+    await this.publishPostCallEvent()
     await this.services.cleanup?.();
   }
 
-  async publishEvent(eventType, payload = {}) {
-  try {
-    await ServiceBusManager.send(
-      config.topics.CALL_EVENTS,
-      {
-        eventType,
-        callId: this.callId,
-        timestamp: new Date().toISOString(),
-        ...payload
-      },
-      {
-        messageId: `${this.callId}-${eventType}`,
-        applicationProperties: {
-          callId: this.callId,
-          eventType
-        }
-      },
-      this.logger
-    );
-
-    this.logger.info({ eventType }, "Service Bus event published");
-  } catch (err) {
-    this.logger.error(
-      { err: err.message, eventType },
-      "Failed to publish Service Bus event"
-    );
-  }
-}
-
-async publishTranscriptEvent(eventType, text, extra = {}) {
-  try {
-    const turnId = ++this.turnCounter;
-
-    await ServiceBusManager.send(
-      config.topics.CALL_TRANSCRIPTS,
-      {
-        eventType,
-        callId: this.callId,
-        turnId,
-        sequence: turnId,
-        text,
-        timestamp: new Date().toISOString(),
-        ...extra
-      },
-      {
-        messageId: `${this.callId}-${eventType}-${turnId}`,
-        applicationProperties: {
-          callId: this.callId,
-          eventType,
-          turnId
-        }
-      },
-      this.logger
-    );
-
-    this.logger.info(
-      { eventType, turnId },
-      "Transcript event published"
-    );
-  } catch (err) {
-    this.logger.error(
-      { err: err.message, eventType },
-      "Failed to publish transcript event"
-    );
-  }
-}
-
-async publishPostCallEvent() {
-  if (this.postCallEventSent) return;
-
-  this.postCallEventSent = true;
-
-  const payload = {
-    eventType: "POST_CALL_SUMMARY_READY",
-    callId: this.callId,
-    durationSec: "To be calculated: 900 sec",
-    direction: "inbound",
-    summary: "Customer requested order cancellation",
-    sentiment: "neutral",
-    intent: "order_cancellation",
-    recordingUrl: "https://storage.blob.core.windows.net/recordings/1234.wav",
-    timestamp: new Date().toISOString()
-  };
-
-  try {
-    await ServiceBusManager.send(
-      config.topics.POST_CALL,
-      payload,
-      {
-        messageId: `${this.callId}-POST_CALL_READY`,
-        applicationProperties: {
-          callId: this.callId,
-          eventType: payload.eventType
-        }
-      },
-      this.logger
-    );
-    this.logger.info("Post-call event published");
-  } catch (err) {
-    this.logger.error(
-      { err: err.message },
-      "Failed to publish post-call event"
-    );
-  }
-}
 }
