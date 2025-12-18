@@ -9,8 +9,7 @@ import AsyncLock from "async-lock";
 import { performance } from "node:perf_hooks";
 import { error } from "node:console";
 import {CallStreamManager} from "../grpc/grpc-client.js"
-
-
+import ServiceBusManager from "../../utils/serviceBusManager.js";
 export class WebSocketHandler {
   constructor(socket, speechManager, services, callId, llmUrl, logger) {
     this.llmUrl = llmUrl;
@@ -18,22 +17,6 @@ export class WebSocketHandler {
     this.logger = logger.child({service: 'WebSocketHandler'})
     this.socket = socket;
     this.speechManager = speechManager;
-    // __define-ocg__ Service Bus guards
-this.callStartedEventSent = false;
-this.callConnectedEventSent = false;
-this.callEndedEventSent = false;
-
-// __define-ocg__ Transcript tracking
-this.turnCounter = 0;
-this.lastUserUtterance = null;
-
-// __define-ocg__ Post-call tracking
-this.callStartTime = Date.now();
-this.callEndTime = null;
-this.postCallEventSent = false;
-
-
-
     this.services = services;
     this.setupEventHandlers();
     this.lastResponseStartTime = null;
@@ -50,8 +33,14 @@ this.postCallEventSent = false;
     this.speechStartTime = 0;
     this.speechProcessTime = 0;
     this.callStreamManager = new CallStreamManager(this.callId, this.logger)
-    //this.audioStreamer = null; //due to distortioncommented on 27-03-25
-
+    this.audioStreamer = null; //due to distortioncommented on 27-03-25
+    this.bgsound=true;
+    this.callStartedEventSent = false;
+    this.callConnectedEventSent = false;
+    this.callEndedEventSent = false;
+    this.turnCounter = 0;
+    this.lastUserUtterance = null;
+    this.postCallEventSent = false;
     // Mark and Clear event handling properties
     this.markQueue = [];
 
@@ -59,8 +48,7 @@ this.postCallEventSent = false;
 
     this.lock = new AsyncLock(); // lock object created for async operations
 
-    this.silenceDetector.on("silenceWarning", async (message) => {
-      //this.audioStreamer.stop(); // added on 27-03-25
+    this.silenceDetector.on("silenceWarning", async (message) => {      
       await this.handleTranscriptProcessing(""); // added on 29-03-25
       if (!this.speechManager.isSpeaking()) {
         this.fetchRedisData = true;
@@ -86,36 +74,6 @@ this.postCallEventSent = false;
 
      this.logger.info("WebSocketHandler initialized");
   }
-
-  // __define-ocg__ Publish event to Azure Service Bus
-async publishEvent(eventType, payload = {}) {
-  try {
-    await ServiceBusManager.send(
-      Topics.CALL_EVENTS,
-      {
-        eventType,
-        callId: this.callId,
-        timestamp: new Date().toISOString(),
-        ...payload
-      },
-      {
-        messageId: `${this.callId}-${eventType}`,
-        applicationProperties: {
-          callId: this.callId,
-          eventType
-        }
-      }
-    );
-
-    this.logger.info({ eventType }, "Service Bus event published");
-  } catch (err) {
-    this.logger.error(
-      { err: err.message, eventType },
-      "Failed to publish Service Bus event"
-    );
-  }
-}
-
 
   getTimestamp() {
     return new Date().toISOString().split("T")[1].slice(0, -1);
@@ -193,9 +151,8 @@ async publishEvent(eventType, payload = {}) {
        this.logger.info(JSON.stringify(msg));
       const { streamSid } = msg.start;
       const callSid = this.callId;
-      this.speechManager.setStreamSidAndcallSid(streamSid, callSid);
-      this.callStreamManager.initStream()
-      //this.audioStreamer = new TwilioAudioStreamer(this.markQueue, this.socket, streamSid);//due to distortioncommented on 27-03-25
+      this.speechManager.setStreamSidAndcallSid(streamSid, callSid);      
+      this.audioStreamer = new TwilioAudioStreamer(this.markQueue, this.socket, streamSid);//due to distortioncommented on 27-03-25
 
       this.markQueue = [];
 
@@ -210,6 +167,18 @@ async publishEvent(eventType, payload = {}) {
       );
        this.logger.info({msg: sttJson.locale}, "STT Data decoded");
        this.logger.info(Object.keys(this.services))
+
+       if (!this.callStartedEventSent) {
+         await this.publishEvent("CALL_STARTED", {
+           provider: "twilio",
+           direction: msg.start?.direction || "inbound",
+           from: msg.start?.from,
+           to: msg.start?.to,
+           streamSid: msg.start?.streamSid,
+         });
+
+         this.callStartedEventSent = true;
+       }
 
       const audioStream = this.services.audioTransformer.createReadableStream();
       //starting grpc stream here
@@ -227,27 +196,13 @@ async publishEvent(eventType, payload = {}) {
         });
       };
 
-      // __define-ocg__ CALL_STARTED event
-if (!this.callStartedEventSent) {
-  await this.publishEvent("CALL_STARTED", {
-    provider: "twilio",
-    direction: msg.start?.direction || "inbound",
-    from: msg.start?.from,
-    to: msg.start?.to,
-    streamSid: msg.start?.streamSid
-  });
-
-  this.callStartedEventSent = true;
-}
-
-
       // Event handler for when a speech segment has ended
       recognizer.speechEndDetected = (_, event) => {
          this.logger.info({msg : JSON.stringify(event)});
       };
 
       // Set up Azure recognition events
-      recognizer.recognized =async (_, event) => {
+      recognizer.recognized = async(_, event) => {
         //console.log(event.result.reason);
         //console.log(sdk.ResultReason.RecognizedSpeech);
         const endTime = performance.now();
@@ -267,21 +222,20 @@ if (!this.callStartedEventSent) {
           speechDetectedLogged = false;
 
           const text = event.result.text;
-          if (true) {
-            // if(this.audioStreamer)  this.audioStreamer.stop();
+          if (true) {            
             this.isRecognizing = false; // added on 29-03-25
-            // __define-ocg__ USER_SPOKE event
-if (text && text.trim().length > 0) {
-  this.lastUserUtterance = text;
+            if (text && text.trim().length > 0) {
+              this.lastUserUtterance = text;
 
-  await this.publishTranscriptEvent("USER_SPOKE", text, {
-    confidence: event.result.confidence,
-    locale: event.result.language
-  });
-}
-
+              await this.publishTranscriptEvent("USER_SPOKE", text, {
+                confidence: event.result.confidence,
+                locale: event.result.language,
+                speaker: 'user'
+              });
+            }
             this.speechManager.handleTranscript(text, false);
             this.isMethodCalledOnce = false; // Reset method call tracker
+            this.bgsound=true;
           }
         }
       };
@@ -311,27 +265,18 @@ if (text && text.trim().length > 0) {
           queueMicrotask(() => {this.handleSpeechDetected();}); // Yield to allow TTS state to update          
           
         }
-        const url = `http://localhost:17000/partial?callid=${encodeURIComponent(this.callId)}`
-          fetch(url)
-          .then(res => {
-            this.logger.info( "response from partial api")
-            this.logger.info( res)
-          })
-          .catch(err => {
-            this.logger.error({
-              msg: "Partial API failed",
-              error: err.message
-            })
-          })
-
         //this.isTTSInterrupted = true;
-
          this.logger.info({
           msg: "Partial transcription",
           callSid,
           text,
         });
         // this.logger.error({callId: this.callId},this.isRecognizing);
+        if(this.bgsound){
+          this.audioStreamer.start();
+          this.logger.info("Background Audio Streamer Started");
+          this.bgsound=false;
+        }
       };
 
       recognizer.canceled = (_, event) => {
@@ -374,13 +319,15 @@ if (text && text.trim().length > 0) {
         this.isSendInterruption,
         transcript === "" ? true : false,
         this.llmUrl
+    
       );
+      this.audioStreamer.stop();//stop background noise
+      this.logger.info("Background Audio Streamer Stopping");
       this.isSendInterruption = false;
       if (response) {
         if (!this.ttsSilenceEmitted) {
           this.silenceDetector.handleActivity(); // reset silence detector
-        }
-        //if (this.audioStreamer) this.audioStreamer.stop()//due to distortioncommented on 27-03-25
+        }      
         await this.generateAndStreamTTS(response);
       }
     } catch (error) {
@@ -392,17 +339,16 @@ if (text && text.trim().length > 0) {
   async generateAndStreamTTS(response) {
     try {
        this.logger.info({ response }, "Starting TTS generation");
-       // __define-ocg__ AGENT_SPOKE event
-await this.publishTranscriptEvent("AGENT_SPOKE", response, {
-  interrupted: this.isSendInterruption,
-  basedOn: this.lastUserUtterance
-});
-
+       await this.publishTranscriptEvent("AIAGENT_SPOKE", response, {
+         interrupted: this.isSendInterruption,
+         basedOn: this.lastUserUtterance,
+         speaker : "ai_agent"
+       });
       this.speechManager.startTTS();
       this.isTTSInterrupted = false;
       this.markQueue = [];
 
-      // if(this.audioStreamer)  this.audioStreamer.stop();//stop background noise
+      
       if (this.isTTSLock) {
         this.isTTSInterrupted = true;
       }
@@ -455,8 +401,7 @@ await this.publishTranscriptEvent("AGENT_SPOKE", response, {
     } finally {
       //this.speechManager.stopTTS();  we will stop TTS when we will receive event form twilio
       this.isTTSInterrupted = false;
-      this.isAgentRecorderInterrupted = false;
-      // await this.audioStreamer.start();//due to distortioncommented on 27-03-25
+      this.isAgentRecorderInterrupted = false;      
       if (!this.ttsSilenceEmitted) {
         this.silenceDetector.handleActivity(); // reset silence detector
       }
@@ -528,6 +473,9 @@ await this.publishTranscriptEvent("AGENT_SPOKE", response, {
         markName: msg.mark?.name,
         remainingMarks: this.markQueue.length,
       });
+      this.audioStreamer.stop();//stop background noise
+      this.logger.info("Background Audio Streamer Stopping");
+      
     }
   }
 
@@ -562,15 +510,17 @@ await this.publishTranscriptEvent("AGENT_SPOKE", response, {
     //     console.warn(`[${this.getTimestamp()}] Received media before stream start`);
     //     //return;
     // }
+
+    // Record caller audio
+
     if (!this.callConnectedEventSent && msg?.media?.payload) {
       this.publishEvent("CALL_CONNECTED", {
         streamSid: this.speechManager.state.streamSid
       });
-  
+
       this.callConnectedEventSent = true;
     }
 
-    // Record caller audio
     if (msg.media?.payload && !this.isAgentRecorderInterrupted) {
       //this.services.audioRecorder.writeCallerAudio(Buffer.from(msg.media.payload, 'base64'));
     }
@@ -624,40 +574,69 @@ await this.publishTranscriptEvent("AGENT_SPOKE", response, {
 
   async cleanup() {
     // Close Event Hub client if call is ending
-    // __define-ocg__ CALL_ENDED event
-if (!this.callEndedEventSent) {
-  await this.publishEvent("CALL_ENDED", {
-    reason: "call_terminated"
-  });
-
-  this.callEndedEventSent = true;
-}
-
     if (this.callEnding && this.eventHubClient) {
       await this.eventHubClient.close();
     }
 
-    this.callStreamManager.close()
-    //this.audioStreamer = null;//due to distortioncommented on 27-03-25
-    this.silenceDetector.cleanup();
-    this.speechManager.cleanup();
-    await this.services.cleanup?.();
-    // __define-ocg__ Emit post-call integration event
-    await this.publishPostCallEvent("completed");
+    if (!this.callEndedEventSent) {
+      await this.publishEvent("CALL_ENDED", {
+        reason: "call_terminated",
+      });
 
+      this.callEndedEventSent = true;
+    }
+
+    this.callStreamManager.close()
+    this.audioStreamer = null;//due to distortioncommented on 27-03-25
+    this.silenceDetector.cleanup();
+    await this.services.transcribeService.stopStream();
+    this.speechManager.cleanup();
+    if(!this.postCallEventSent){
+      await this.publishPostCallEvent()
+    }
+    await this.services.cleanup?.();
   }
 
-// __define-ocg__ Publish transcript events
+  async publishEvent(eventType, payload = {}) {
+  try {
+    await ServiceBusManager.send(
+      config.topics.CALL_EVENTS,
+      {
+        eventType,
+        callId: this.callId,
+        timestamp: new Date().toISOString(),
+        ...payload
+      },
+      {
+        messageId: `${this.callId}-${eventType}`,
+        applicationProperties: {
+          callId: this.callId,
+          eventType
+        }
+      },
+      this.logger
+    );
+
+    this.logger.info({ eventType }, "Service Bus event published");
+  } catch (err) {
+    this.logger.error(
+      { err: err.message, eventType },
+      "Failed to publish Service Bus event"
+    );
+  }
+}
+
 async publishTranscriptEvent(eventType, text, extra = {}) {
   try {
     const turnId = ++this.turnCounter;
 
     await ServiceBusManager.send(
-      Topics.CALL_TRANSCRIPTS,
+      config.topics.CALL_TRANSCRIPTS,
       {
         eventType,
         callId: this.callId,
         turnId,
+        sequence: turnId,
         text,
         timestamp: new Date().toISOString(),
         ...extra
@@ -669,7 +648,8 @@ async publishTranscriptEvent(eventType, text, extra = {}) {
           eventType,
           turnId
         }
-      }
+      },
+      this.logger
     );
 
     this.logger.info(
@@ -684,28 +664,26 @@ async publishTranscriptEvent(eventType, text, extra = {}) {
   }
 }
 
-// __define-ocg__ Publish post-call integration event
-async publishPostCallEvent(status) {
+async publishPostCallEvent() {
   if (this.postCallEventSent) return;
 
-  this.callEndTime = Date.now();
   this.postCallEventSent = true;
 
   const payload = {
-    eventType: "POST_CALL_READY",
+    eventType: "POST_CALL_SUMMARY_READY",
     callId: this.callId,
-    provider: "twilio",
-    status,
-    startedAt: new Date(this.callStartTime).toISOString(),
-    endedAt: new Date(this.callEndTime).toISOString(),
-    durationMs: this.callEndTime - this.callStartTime,
-    turnCount: this.turnCounter,
+    durationSec: "To be calculated: 900 sec",
+    direction: "inbound",
+    summary: "Customer requested order cancellation",
+    sentiment: "neutral",
+    intent: "order_cancellation",
+    recordingUrl: "https://storage.blob.core.windows.net/recordings/1234.wav",
     timestamp: new Date().toISOString()
   };
 
   try {
     await ServiceBusManager.send(
-      Topics.POST_CALL,
+      config.topics.POST_CALL,
       payload,
       {
         messageId: `${this.callId}-POST_CALL_READY`,
@@ -713,7 +691,8 @@ async publishPostCallEvent(status) {
           callId: this.callId,
           eventType: payload.eventType
         }
-      }
+      },
+      this.logger
     );
     this.logger.info("Post-call event published");
   } catch (err) {
@@ -723,7 +702,4 @@ async publishPostCallEvent(status) {
     );
   }
 }
-
-
 }
-
