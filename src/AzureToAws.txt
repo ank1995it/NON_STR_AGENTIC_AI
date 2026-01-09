@@ -1,0 +1,32 @@
+| Azure                   | AWS Equivalent                        |
+| ----------------------- | ------------------------------------- |
+| App Service / Container | **Amazon ECS (Fargate)**              |
+| Application Insights    | **Amazon CloudWatch + **AWS X-Ray**   |
+| Azure Load Balancer     | **Application Load Balancer**         |
+| Azure STT               | **Amazon Transcribe**                 |
+| Azure TTS               | **Amazon Polly**                      |
+| Azure Service Bus       | **Amazon SQS / **Amazon EventBridge** |
+
+
+
+
+1. Lambda problems:
+WebSocket timeouts
+Cold starts during calls
+No GPU / ONNX friendly environment
+Hard to maintain call state
+Execution time limits (even with 15 mins)
+
+
+| Aspect          | Azure STT   | AWS Transcribe |
+| --------------- | ----------- | -------------- |
+| Audio flow      | Push stream | WebSocket pull |
+| SDK abstraction | High        | Low (manual)   |
+| Cold start      | Needed      | Not needed     |
+| Language detect | Easy        | Limited        |
+
+
+Move logging → CloudWatch
+Move Service Bus → SQS/EventBridge
+Move TTS → Polly
+Move STT → Transcribe
