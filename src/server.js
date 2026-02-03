@@ -6,7 +6,7 @@ import { config } from './config/index.js';
 import { setupSecurity } from './middleware/security.js';
 import { logger } from './utils/logger.js';
 import { setupRoutes } from './routes/index.js';
-import SNSManager from "./utils/snsManager.js";
+// import SNSManager from "./utils/snsManager.js";
 const app = Fastify({
     logger,
     trustProxy: config.server.trustProxy,
@@ -26,7 +26,7 @@ async function startServer() {
 
         // Setup routes
         await setupRoutes(app);
-        SNSManager.init({region : "ap-south-1"});
+        // SNSManager.init({region : "ap-south-1"});
 
         // Start server
         await app.listen({

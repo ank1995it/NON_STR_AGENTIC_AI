@@ -1,68 +1,66 @@
+// src/simulator/call-simulator.js
 import WebSocket from 'ws';
 import fs from 'fs';
 import { CONFIG } from './config.js';
 
-export function simulateCall(callIndex) {
+export function simulateCall(callNumber) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(CONFIG.WS_URL);
+    const callId = `loadtest-${process.pid}-${Date.now()}-${callNumber}`;
+    const streamSid = `stream-${callId}`;
 
-    const callSid = `CA_LOAD_${callIndex}_${Date.now()}`;
-    const streamSid = `MZ_STREAM_${callIndex}_${Date.now()}`;
+    const wsUrl =
+      `ws://${CONFIG.HOST}:${CONFIG.PORT}` +
+      `${CONFIG.WS_PREFIX}/${callId}/${CONFIG.VOICE_DATA}/${CONFIG.LLM_URL}`;
 
-    let seq = 1;
-    let audioOffset = 0;
+    const ws = new WebSocket(wsUrl);
 
     const audioBuffer = fs.readFileSync(CONFIG.AUDIO_FILE);
+    const bytesPerMs = CONFIG.SAMPLE_RATE / 1000;
+    const chunkSize = bytesPerMs * CONFIG.CHUNK_MS;
 
-    ws.on('open', async () => {
-      // START
+    let offset = 0;
+    let seq = 1;
+
+    ws.on('open', () => {
+      console.log(`✅ WS connected: ${callId}`);
+
+      // 1️⃣ START event (Twilio-style)
       ws.send(JSON.stringify({
         event: 'start',
         sequenceNumber: seq++,
         start: {
-          accountSid: 'AC_LOAD_TEST',
-          callSid,
+          callSid: callId,
           streamSid,
-          tracks: ['inbound'],
           mediaFormat: {
             encoding: 'audio/x-mulaw',
-            sampleRate: 8000,
+            sampleRate: CONFIG.SAMPLE_RATE,
             channels: 1
           }
         }
       }));
 
-      const bytesPerMs = CONFIG.SAMPLE_RATE / 1000;
-      const chunkSize = bytesPerMs * CONFIG.CHUNK_MS;
-
+      // 2️⃣ MEDIA events (real-time pacing)
       const interval = setInterval(() => {
-        if (audioOffset >= audioBuffer.length) {
+        if (offset >= audioBuffer.length) {
           clearInterval(interval);
 
+          // 3️⃣ STOP event
           ws.send(JSON.stringify({
             event: 'stop',
-            sequenceNumber: seq++,
-            stop: { accountSid: 'AC_LOAD_TEST', callSid }
+            sequenceNumber: seq++
           }));
 
           ws.close();
           return;
         }
 
-        const chunk = audioBuffer.slice(
-          audioOffset,
-          audioOffset + chunkSize
-        );
-
-        audioOffset += chunkSize;
+        const chunk = audioBuffer.slice(offset, offset + chunkSize);
+        offset += chunkSize;
 
         ws.send(JSON.stringify({
           event: 'media',
           sequenceNumber: seq++,
           media: {
-            track: 'inbound',
-            timestamp: Date.now().toString(),
-            chunk: seq.toString(),
             payload: chunk.toString('base64')
           }
         }));
@@ -70,10 +68,17 @@ export function simulateCall(callIndex) {
     });
 
     ws.on('message', () => {
-      // Optional: count TTS frames
+      // optional: count TTS frames later
     });
 
-    ws.on('close', () => resolve());
-    ws.on('error', reject);
+    ws.on('close', () => {
+      console.log(`🔚 Call ended: ${callId}`);
+      resolve();
+    });
+
+    ws.on('error', err => {
+      console.error(`❌ WS error (${callId}):`, err.message);
+      reject(err);
+    });
   });
 }
