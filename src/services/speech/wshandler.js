@@ -11,6 +11,7 @@ import { CallStreamManager } from "../grpc/grpc-client.js";
 import { CallEventPublisher } from "../snsEvents/callEventPublisher.js";
 export class WebSocketHandler {
   constructor(socket, speechManager, services, callId, llmUrl, logger) {
+    let isCallAlive = true;
     this.llmUrl = llmUrl;
     this.callId = callId;
     this.logger = logger.child({ service: "WebSocketHandler" });
@@ -383,6 +384,12 @@ export class WebSocketHandler {
         basedOn: this.lastUserUtterance,
         speaker: "ai_agent",
       });
+
+      if (!isCallAlive) {
+        logger.warn('Call ended before TTS, skipping');
+        return;
+      }
+      
       this.speechManager.startTTS();
       this.isTTSInterrupted = false;
       this.markQueue = [];
@@ -608,6 +615,7 @@ export class WebSocketHandler {
     if (this.callEnding && this.eventHubClient) {
       await this.eventHubClient.close();
     }
+    isCallAlive = false;
 
     this.callStreamManager.close();
     this.audioStreamer = null; //due to distortioncommented on 27-03-25
