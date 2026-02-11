@@ -1,7 +1,6 @@
 // load-runner.js
 
 import { simulateCall } from './call-simulator.js';
-import CONFIG from './config.js';
 
 // ================= TEST CONFIG =================
 const TEST_DURATION_MS = 5 * 60 * 1000; // 5 minutes
