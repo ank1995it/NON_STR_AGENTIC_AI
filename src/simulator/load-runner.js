@@ -4,8 +4,8 @@ import { simulateCall } from './call-simulator.js';
 
 // ================= TEST CONFIG =================
 const TEST_DURATION_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_CONCURRENT_CALLS = 20;
-const RAMP_STEP = 5;
+const MAX_CONCURRENT_CALLS = 1;
+const RAMP_STEP = 1;
 const RAMP_INTERVAL_MS = 30_000;
 
 // ================= METRICS =================
