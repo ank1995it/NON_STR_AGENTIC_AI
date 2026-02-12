@@ -97,15 +97,15 @@ export class ConversationEngine {
 
       if (offset >= buffer.length) {
    
-        const silentChunk = Buffer.alloc(this.chunkSize,0xFF )
-        let silenceFrames = 1000/ this.chunkMs;
-        for(let i=0;i< silenceFrames;i++){
-          this.ws.send(JSON.stringify({
-            event: 'media',
-            sequenceNumber: this.sequenceRef(),
-            media: {payload: silentChunk.toString("base64")}
-          }))
-        }
+        // const silentChunk = Buffer.alloc(this.chunkSize,0xFF )
+        // let silenceFrames = 1000/ this.chunkMs;
+        // for(let i=0;i< silenceFrames;i++){
+        //   this.ws.send(JSON.stringify({
+        //     event: 'media',
+        //     sequenceNumber: this.sequenceRef(),
+        //     media: {payload: silentChunk.toString("base64")}
+        //   }))
+        // }
            console.log("📌 User finished speaking → sending mark");
 
       setTimeout(()=>{
