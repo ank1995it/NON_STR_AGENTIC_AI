@@ -26,7 +26,7 @@ export class ConversationEngine {
       { audio: './yes_please.ulaw' }
     ];
 
-    this.current = 0;
+    this.current = -1;
     this.ended = false;
 
     this.bytesPerMs = this.sampleRate / 1000;
@@ -44,27 +44,31 @@ export class ConversationEngine {
       console.log("No data on on server")
       return;
     }
-    if(data.event === "media" && !this.hasSentFirstUserAudio){
-      this.welcomeMediaCount++;
-           clearTimeout(this.silenceTimer)
-           this.silenceTimer = setTimeout(()=>{
-            if(this.welcomeMediaCount > 10){
- console.log("agent stop spealing silence detected")
-                this.hasSentFirstUserAudio = true;
-              this._sendCurrentStep();
-            }
+//     if(data.event === "media" && !this.hasSentFirstUserAudio){
+//       this.welcomeMediaCount++;
+//            clearTimeout(this.silenceTimer)
+//            this.silenceTimer = setTimeout(()=>{
+//             if(this.welcomeMediaCount > 10){
+//  console.log("agent stop spealing silence detected")
+//                 this.hasSentFirstUserAudio = true;
+//               this._sendCurrentStep();
+//             }
            
-           }, 5000)
-    }
+//            }, 1500)
+//     }
 
     if (data.event === "stop_tts") {
       console.log("🛑 Received stop_tts from server");
-      if(!this.hasSentFirstUserAudio) return;
+      // if(!this.hasSentFirstUserAudio) return;
       this._nextStep();
     }
   }
 
   _nextStep() {
+    if(this.isUserSpeaking){
+      console.log("user still speaking")
+      return;
+    }
     this.current++;
 
     if (this.current >= this.steps.length) {
@@ -83,7 +87,7 @@ export class ConversationEngine {
     const step = this.steps[this.current];
     const filePath = path.join(__dirname, step.audio);
 
-    console.log(`▶ Sending step ${this.current + 1}: ${step.audio}`);
+    console.log(`▶ Sending step ${this.current }: ${step.audio}`);
 
     const buffer = fs.readFileSync(filePath);
     let offset = 0;
@@ -92,8 +96,7 @@ export class ConversationEngine {
       if (this.ended) return;
 
       if (offset >= buffer.length) {
-        console.log("📌 User finished speaking → sending mark");
-
+   
         const silentChunk = Buffer.alloc(this.chunkSize,0xFF )
         let silenceFrames = 1000/ this.chunkMs;
         for(let i=0;i< silenceFrames;i++){
@@ -103,6 +106,7 @@ export class ConversationEngine {
             media: {payload: silentChunk.toString("base64")}
           }))
         }
+           console.log("📌 User finished speaking → sending mark");
 
       setTimeout(()=>{
         console.log("mark event")
@@ -111,7 +115,8 @@ export class ConversationEngine {
           mark: { name: "end_of_user_audio" }
         }));
       },1000)
-
+       
+        this.isUserSpeaking = false;
         return;
       }
 
@@ -130,7 +135,6 @@ export class ConversationEngine {
     };
 
     sendFrame();
-    this.isUserSpeaking = false;
   }
 
   _endCall() {
