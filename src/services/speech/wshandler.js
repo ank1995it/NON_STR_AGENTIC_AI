@@ -11,7 +11,7 @@ import { CallStreamManager } from "../grpc/grpc-client.js";
 import { CallEventPublisher } from "../snsEvents/callEventPublisher.js";
 export class WebSocketHandler {
   constructor(socket, speechManager, services, callId, llmUrl, logger) {
-    let isCallAlive = true;
+    this.isCallActive= true;
     this.llmUrl = llmUrl;
     this.callId = callId;
     this.logger = logger.child({ service: "WebSocketHandler" });
@@ -152,13 +152,15 @@ export class WebSocketHandler {
 
   async handleStart(msg) {
     try {
+      this.logger.info("inside hanlde start");
+
       this.logger.info(JSON.stringify(msg));
       const { streamSid } = msg.start;
       const callSid = this.callId;
       this.speechManager.setStreamSidAndcallSid(streamSid, callSid);
 
       if (!this.callConnectedEventSent) {
-        this.eventPublisher.publishCallEvent("CALL_CONNECTED");
+        // this.eventPublisher.publishCallEvent("CALL_CONNECTED");
 
         this.callConnectedEventSent = true;
       }
@@ -230,11 +232,11 @@ export class WebSocketHandler {
             if (text && text.trim().length > 0) {
               this.lastUserUtterance = text;
 
-              await this.eventPublisher.publishTranscript("USER_SPOKE", text, {
-                confidence: event.result.confidence,
-                locale: event.result.language,
-                speaker: "user",
-              });
+              // await this.eventPublisher.publishTranscript("USER_SPOKE", text, {
+              //   confidence: event.result.confidence,
+              //   locale: event.result.language,
+              //   speaker: "user",
+              // });
             }
             this.speechManager.handleTranscript(text, false);
             this.isMethodCalledOnce = false; // Reset method call tracker
@@ -379,37 +381,42 @@ export class WebSocketHandler {
           : JSON.stringify(response);
       console.log("tts payload", ttsPayload);
       this.logger.info({ ttsPayload }, ttsPayload);
-      await this.eventPublisher.publishTranscript("AIAGENT_SPOKE", ttsPayload, {
-        interrupted: this.isSendInterruption,
-        basedOn: this.lastUserUtterance,
-        speaker: "ai_agent",
-      });
-
-      if (!isCallAlive) {
-        logger.warn('Call ended before TTS, skipping');
+      if(!this.isCallActive){
+        console.log("returning from inside is call active")
+        this.logger.info("returning from inside is call active")
         return;
       }
-      
+       this.logger.info("line 389")
+      // await this.eventPublisher.publishTranscript("AIAGENT_SPOKE", ttsPayload, {
+      //   interrupted: this.isSendInterruption,
+      //   basedOn: this.lastUserUtterance,
+      //   speaker: "ai_agent",
+      // });
       this.speechManager.startTTS();
       this.isTTSInterrupted = false;
       this.markQueue = [];
+       this.logger.info("line 398")
 
       if (this.isTTSLock) {
         this.isTTSInterrupted = true;
       }
+       this.logger.info("line 403")
+
       this.socket.send(
         JSON.stringify({
           event: "clear",
           streamSid: this.speechManager.state.streamSid,
         })
       );
+       this.logger.info("line 411")
+
       await this.lock.acquire(this.callId, async () => {
         this.isTTSLock = true; // Lock TTS
         const audioGenerator = await this.services.ttsService.synthesize(
           ttsPayload,
           this.callId
         );
-
+        this.logger.info({audioGenerator}, "audio generator")
         for await (const chunk of audioGenerator) {
           // Check for interruption
           if (this.isTTSInterrupted) {
@@ -430,6 +437,8 @@ export class WebSocketHandler {
         }
         this.isTTSLock = false; // Release TTS lock
       });
+       this.logger.info("line 440")
+
       this.socket.send(
         JSON.stringify({
           event: "mark",
@@ -478,6 +487,8 @@ export class WebSocketHandler {
   }
 
   sendStopTTS() {
+    this.logger.info("sending stop tts signal")
+    this.logger.info(this.socket?._socket?.remoteAddress)
     console.log(`[${this.getTimestamp()}] Sending stop TTS signal`);
     this.socket.send(
       JSON.stringify({
@@ -508,10 +519,12 @@ export class WebSocketHandler {
 
   // Handle mark events received from Twilio
   handleMarkEvent(msg) {
+    this.logger.info("inside mark event", msg.mark?.name)
     if (this.markQueue.length > 0) {
       this.markQueue.shift();
     }
     if (msg.mark?.name === "endMark") {
+      this.logger.info("line 527")
       this.speechManager.stopTTS(); // Stop TTS if mark is received
       this.logger.info({
         msg: "Processed mark event",
@@ -612,10 +625,10 @@ export class WebSocketHandler {
 
   async cleanup() {
     // Close Event Hub client if call is ending
+    this.isCallActive= false;
     if (this.callEnding && this.eventHubClient) {
       await this.eventHubClient.close();
     }
-    isCallAlive = false;
 
     this.callStreamManager.close();
     this.audioStreamer = null; //due to distortioncommented on 27-03-25
