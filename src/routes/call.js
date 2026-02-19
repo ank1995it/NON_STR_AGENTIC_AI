@@ -8,6 +8,8 @@ import fs from "fs";
 import { TwiMLTTSService } from "../services/tts/twiml.js";
 import { BlobServiceClient } from "@azure/storage-blob";
 import axios from 'axios';
+import { CallEventPublisher } from "../services/serviceBusEvents/callEventPublisher.js";
+
 // import twilio from "twilio";
 // import crypto from "crypto";
 
@@ -59,7 +61,7 @@ fastify.get("/test/:callId", async (request, reply) => {
 
   // Handle incoming Twilio voice calls
   fastify.post("/v1/calls/incoming/:voice/:llm/:packed?", async (request, reply) => {
-     const { CallSid } = request.body;
+     const { CallSid, Direction, From, To } = request.body;
      request.log = request.log.child({ CallSid});
     try {
       request.log.info(request.headers['x-twilio-signature'], "Twilio Signature");
@@ -82,6 +84,13 @@ fastify.get("/test/:callId", async (request, reply) => {
         return; 
       }
       else {
+        new CallEventPublisher(CallSid,request.log ).publishCallEvent("CALL_STARTED", {
+          provider: "twilio",
+          direction: Direction,
+          from: From,
+          to: To,
+          callId: CallSid
+        });
         request.log.info( {twimlResponse},`twiml response `);
         request.log.info("Valid Twilio request signature");
         reply.type("text/xml").send(twimlResponse);
@@ -106,10 +115,46 @@ fastify.get("/test/:callId", async (request, reply) => {
     }
   });
 
+  
+  fastify.post("/v1/calls/status", async (request, reply) => {
+    try {
+      const body = request.body;
+      logger.info({ body }, "Calls status received");
+      const { CallSid, CallStatus } = request.body;
+      new CallEventPublisher(CallSid,request.log ).publishCallEvent("CALL_ENDED", {
+           reason: "Call Completed",
+           status: CallStatus
+      })
+      logger.info({ callId:CallSid, CallStatus }, "Call status ..");
+      reply.send({ status: "received" });
+    } catch (error) {
+      logger.error("Error occured in call status callback:", error);
+      throw error;     
+    }
+  });
+
+  fastify.post("/v1/calls/post-call", async (request, reply) => {
+    const body = request.body;
+    const logger = request.log.child({ callId: body.callId });
+    try {
+      logger.info({ body }, "Post call request received");
+      new CallEventPublisher(body.callId, logger).publishPostCallSummary(body);
+      reply.send({ status: "received post call summary request" });
+    } catch (error) {
+      logger.error("Error occured in post-call status callback:", error);
+      throw error;
+    }
+  });
+
+
   // WebSocket endpoint for media streaming
   fastify.get("/media-stream/:callId/:voiceData/:llmUrl", { websocket: true }, async (connection, req) => {
      const { callId ,voiceData , llmUrl  } = req.params;  
+
      const logger  = req.log.child({ callId});
+     logger.info({llmUrl, voiceData, callId},"llm url")
+     logger.info(llmUrl)
+
     try {
       //logger.info(req, "WebSocket headers");      
      // logger.info(req.headers['x-twilio-signature'], "Twilio Signature");
