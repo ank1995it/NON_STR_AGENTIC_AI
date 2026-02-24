@@ -171,7 +171,7 @@ export class WebSocketHandler {
       this.markQueue = [];
 
       // Start recording
-      //this.services.audioRecorder.startRecording(callSid);
+      this.services.audioRecorder.startRecording(callSid);
 
       this.silenceDetector.initializeDetector(); // starts silence detector
       const sttJson = JSON.parse(
