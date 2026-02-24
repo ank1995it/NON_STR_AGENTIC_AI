@@ -67,7 +67,8 @@ export class WebSocketHandler {
       }
     });
 
-    this.silenceDetector.on("disconnectCall", () => {
+    this.silenceDetector.on("disconnectCall", async () => {
+      await this.finalizeCall("CALL_END_BY_BOT", "silence_timeout");
       new TwiMLTTSService(config).disconnectCall(this.callId);
       this.handleStop();
     });
@@ -132,6 +133,7 @@ export class WebSocketHandler {
           await this.handleStop();
           break;
         case "mark":
+          await this.finalizeCall("CALL_END_BY_CUSTOMER");
           this.handleMarkEvent(msg);
           break;
         default:
@@ -337,6 +339,7 @@ export class WebSocketHandler {
       }
 
       if (cutCallStatus) {
+        await this.finalizeCall("CALL_END_BY_BOT");
         new TwiMLTTSService(config).disconnectCall(this.callId);
         this.handleStop();
       }
@@ -594,11 +597,17 @@ export class WebSocketHandler {
   }
 
   async handleClose() {
+    if (!this.callEndedEventSent) {
+      await this.finalizeCall("DISCONNECTED_BY_CALLER", "websocket_closed");
+    }
     console.log(`[${this.getTimestamp()}] WebSocket connection closed`);
     await this.cleanup();
   }
 
   async handleError(error) {
+    if (!this.callEndedEventSent) {
+      await this.finalizeCall("DISCONNECTED_BY_CALLER", error.message);
+    }
     console.error(`[${this.getTimestamp()}] WebSocket error:`, error);
     await this.cleanup();
   }
@@ -627,5 +636,31 @@ export class WebSocketHandler {
       intent: "order_cancellation",
       recordingUrl: "https://storage.blob.core.windows.net/recordings/1234.wav",
     });
+  }
+
+  async finalizeCall(status, reason = null) {
+    if (this.callEndedEventSent) {
+      return; // prevent duplicate execution
+    }
+  
+    this.callEndedEventSent = true;
+    this.finalCallStatus = status;
+  
+    const duration = Math.floor((Date.now() - this.callStartTime) / 1000);
+  
+    this.logger.info({
+      callId: this.callId,
+      status,
+      duration,
+      reason
+    }, "Finalizing call");
+  
+    await this.eventPublisher.publishCallEvent("CALL_ENDED", {
+      status,
+      duration,
+      reason
+    });
+  
+    await this.triggerPostCallSummary();
   }
 }
