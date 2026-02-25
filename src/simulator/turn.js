@@ -118,27 +118,45 @@ export class ConversationEngine {
       if (this.ended) return;
 
       if (offset >= buffer.length) {
-   
-        // const silentChunk = Buffer.alloc(this.chunkSize,0xFF )
-        // let silenceFrames = 1000/ this.chunkMs;
-        // for(let i=0;i< silenceFrames;i++){
-        //   this.ws.send(JSON.stringify({
-        //     event: 'media',
-        //     sequenceNumber: this.sequenceRef(),
-        //     media: {payload: silentChunk.toString("base64")}
-        //   }))
-        // }
-           console.log("📌 User finished speaking → sending mark");
 
-      setTimeout(()=>{
-        console.log("mark event")
+        console.log("📌 User finished speaking → adding silence");
+      
+        // 500ms silence for 8kHz ulaw
+        const silenceBytes = this.sampleRate * 0.5; // 8000 * 0.5 = 4000 bytes
+        const silenceBuffer = Buffer.alloc(silenceBytes, 0xFF);
+      
+        let silenceOffset = 0;
+      
+        const sendSilence = () => {
+          if (silenceOffset >= silenceBuffer.length) {
+            console.log("📌 Silence complete → sending mark");
+      
+            this.ws.send(JSON.stringify({
+              event: "mark",
+              mark: { name: "end_of_user_audio" }
+            }));
+      
+            this.isUserSpeaking = false;
+            return;
+          }
+      
+          const chunk = silenceBuffer.slice(
+            silenceOffset,
+            silenceOffset + this.chunkSize
+          );
+      
+          silenceOffset += this.chunkSize;
+      
           this.ws.send(JSON.stringify({
-          event: "mark",
-          mark: { name: "end_of_user_audio" }
-        }));
-      },1000)
-       
-        this.isUserSpeaking = false;
+            event: "media",
+            sequenceNumber: this.sequenceRef(),
+            media: { payload: chunk.toString("base64") }
+          }));
+      
+          setTimeout(sendSilence, this.chunkMs);
+        };
+      
+        sendSilence();
         return;
       }
 
