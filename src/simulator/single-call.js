@@ -24,39 +24,42 @@ export function runSingleCall() {
 
     const ws = new WebSocket(wsUrl);
 
-    ws.on("open", () => {
-      console.log("✅ WebSocket connected");
+    ws.on("open", async () => {
+  console.log("✅ WebSocket connected");
 
-      ws.send(JSON.stringify({
-        event: "start",
-        sequenceNumber: seq++,
-        start: {
-          callSid: callId,
-          streamSid,
-          mediaFormat: {
-            encoding: "audio/x-mulaw",
-            sampleRate: 8000,
-            channels: 1
-          },
-          customParameters:{
-            sttData : sttBase64
-          }
-        }
-      }));
+  ws.send(JSON.stringify({
+    event: "start",
+    sequenceNumber: seq++,
+    start: {
+      callSid: callId,
+      streamSid,
+      mediaFormat: {
+        encoding: "audio/x-mulaw",
+        sampleRate: 8000,
+        channels: 1
+      },
+      customParameters: {
+        sttData: sttBase64
+      }
+    }
+  }));
 
-      const engine = new ConversationEngine({
-        ws,
-        callId,
-        sequenceRef: () => seq++
-      });
+  const engine = new ConversationEngine({
+    ws,
+    callId,
+    sequenceRef: () => seq++
+  });
 
-      ws.on("message", (msg) => {
-        const data = JSON.parse(msg.toString());
-        engine.onServerMessage(data);
-      });
+  // 🔥 CALL INITIALIZE HERE
+  await engine.initialize();
 
-      engine.start();
-    });
+  ws.on("message", (msg) => {
+    const data = JSON.parse(msg.toString());
+    engine.onServerMessage(data);
+  });
+
+  engine.start();
+});
 
     ws.on("close", () => {
       console.log("WS closed");

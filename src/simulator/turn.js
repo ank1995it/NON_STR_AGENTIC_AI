@@ -2,6 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ElevenLabTtsService } from '../services/tts/eleven-labs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,16 +22,36 @@ export class ConversationEngine {
     this.lastMediaTime = null;
     this.silenceTimer = null;
     this.welcomeMediaCount = 0;
+    this.ttsService = new ElevenLabTtsService(voiceId,config);
     this.steps = [
-      { audio: './hi_name.ulaw' },
-      { audio: './yes_please.ulaw' }
+      "Hi, my name is Ankit",
+      "Yes please, tell me my shipment status"
     ];
+    this.audioBuffers = [];
 
     this.current = -1;
     this.ended = false;
 
     this.bytesPerMs = this.sampleRate / 1000;
     this.chunkSize = this.bytesPerMs * this.chunkMs;
+  }
+
+  async initialize() {
+    this.audioBuffers = [];
+  
+    for (const text of this.steps) {
+      const generator = await this.ttsService.synthesize(
+        JSON.stringify({ assistant: text }),
+        this.callId
+      );
+  
+      const chunks = [];
+      for await (const chunk of generator) {
+        chunks.push(Buffer.from(chunk, "base64"));
+      }
+  
+      this.audioBuffers.push(Buffer.concat(chunks));
+    }
   }
 
   start() {
@@ -85,11 +106,12 @@ export class ConversationEngine {
     this.isUserSpeaking= true;
     this.varOrd++;
     const step = this.steps[this.current];
-    const filePath = path.join(__dirname, step.audio);
+    // const filePath = path.join(__dirname, step.audio);
 
     console.log(`▶ Sending step ${this.current }: ${step.audio}`);
 
-    const buffer = fs.readFileSync(filePath);
+    // const buffer = fs.readFileSync(filePath);
+    const buffer = this.audioBuffers[this.current];
     let offset = 0;
 
     const sendFrame = () => {
