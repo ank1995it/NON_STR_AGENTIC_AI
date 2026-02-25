@@ -9,6 +9,13 @@ export function runSingleCall() {
     const streamSid = `stream-${callId}`;
     let seq = 1;
 
+    const sttObj = {
+      locale: 'en-US'
+    }
+
+    const sttBase64 = Buffer.from(JSON.stringify(sttObj))
+                             .toString("base64")
+
     const wsUrl =
       `ws://${CONFIG.HOST}:${CONFIG.PORT}` +
       `${CONFIG.WS_PREFIX}/${callId}/${CONFIG.VOICE_DATA}/${CONFIG.LLM_URL}`;
@@ -30,6 +37,9 @@ export function runSingleCall() {
             encoding: "audio/x-mulaw",
             sampleRate: 8000,
             channels: 1
+          },
+          customParameters:{
+            sttData : sttBase64
           }
         }
       }));
