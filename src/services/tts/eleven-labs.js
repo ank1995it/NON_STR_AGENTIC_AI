@@ -3,15 +3,16 @@ import { logger } from '../../utils/logger.js';
 
 const CHUNK_SIZE = 160; // Chunk size in bytes
 
-export class ElevenLabTtsService {
+export class ElevenLabsTtsService {
   /**
    * @param {object} config - Configuration object.
    * @param {string} config.apiKey - Your ElevenLabs API key.
    * @param {object} config.tts - TTS-specific configuration.
    * @param {string} config.tts.voiceId - Default voice ID.
    */
-  constructor(voiceId, config) {
+  constructor(voiceId, config,logger) {
     this.config = config;
+    this.logger = logger;
     this.client = new ElevenLabsClient({
       apiKey: config.elevenlabs.apiKey,
     });
@@ -44,16 +45,17 @@ export class ElevenLabTtsService {
    * @param {string} [callId] - Optional identifier for logging.
    * @returns {Promise<AsyncIterable<string>>} - A generator yielding base64‑encoded audio chunks.
    */
-  async synthesize(text, callId) {
+  async *synthesize(text, callId) {
     try {
-      logger.info({ callId, textLength: text?.length }, "Starting ElevenLabs TTS synthesis");
-      logger.info(this.client)
-      logger.info(this.config.elevenlabs.voiceId)
-      logger.info(this.config.elevenlabs.modelId)
+      this.logger.info({ callId, textLength: text?.length }, "Starting ElevenLabs TTS synthesis");
+      this.logger.info(this.client);
+      this.logger.info(this.config.elevenlabs.voiceId);
+      this.logger.info(this.config.elevenlabs.modelId);
 
-      const botResponse = JSON.parse(text);
+      //const botResponse = JSON.parse(text);
+      const initialTime = performance.now();
       const audioStream = await this.client.textToSpeech.convertAsStream(this.voiceId || this.config.elevenlabs.voiceId, {
-	      text:botResponse.assistant,
+	      text,
         model_id: this.config.elevenlabs.modelId,
         output_format: 'ulaw_8000', // ElevenLabs returns ulaw audio,
         apply_text_normalization:'off',
@@ -66,19 +68,23 @@ export class ElevenLabTtsService {
         }
         
       });
-
+      
       // Collect the raw audio stream into a Buffer
-      const chunks = [];
+      let count = 0;
       for await (const chunk of audioStream) {
-        chunks.push(chunk);
+        if(count===0){
+           this.logger.info({ callId, latency: (performance.now() - initialTime).toFixed(2) }, "Received first audio chunk from ElevenLabs");
+           count++;
+        }
+          yield chunk;//chunks.push(chunk);
       }
-      const audioBuffer = Buffer.concat(chunks);
-      if (!audioBuffer || audioBuffer.length === 0) {
-        throw new Error("Invalid ElevenLabs response: Empty audio data");
-      }
+      // const audioBuffer = Buffer.concat(chunks);
+      // if (!audioBuffer || audioBuffer.length === 0) {
+      //   throw new Error("Invalid ElevenLabs response: Empty audio data");
+      // }
 
       // Return an async generator that yields base64‑encoded chunks of the raw audio data
-      return this.generateAudioChunks(audioBuffer);
+      //return this.generateAudioChunks(audioBuffer);
     } catch (error) {
       logger.error(error, "ElevenLabs TTS synthesis error:");
       throw error;
