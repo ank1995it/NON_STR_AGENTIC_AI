@@ -2,6 +2,7 @@
 import WebSocket from 'ws';
 import { ConversationEngine } from './turn.js';
 import { CONFIG } from './config.js';
+import { metrics } from "./metrics.js";
 
 export function runSingleCall() {
   return new Promise((resolve, reject) => {
@@ -26,7 +27,7 @@ export function runSingleCall() {
 
     ws.on("open", async () => {
   console.log("✅ WebSocket connected");
-
+  metrics.callConnected();
   ws.send(JSON.stringify({
     event: "start",
     sequenceNumber: seq++,
@@ -47,7 +48,10 @@ export function runSingleCall() {
   const engine = new ConversationEngine({
     ws,
     callId,
-    sequenceRef: () => seq++
+    sequenceRef: () => seq++,
+    onComplete: () => {
+      metrics.callCompleted();
+    }
   });
 
   // 🔥 CALL INITIALIZE HERE
@@ -63,9 +67,14 @@ export function runSingleCall() {
 
     ws.on("close", () => {
       console.log("WS closed");
+      metrics.callCompleted();
       resolve();
     });
 
-    ws.on("error", reject);
+    ws.on("error", (err) => {
+      console.error("WS Error:", err);
+      metrics.callFailed();
+      reject(err);
+    });
   });
 }

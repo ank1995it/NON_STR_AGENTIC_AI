@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export class ConversationEngine {
-  constructor({ ws, callId, sequenceRef, sampleRate = 8000, chunkMs = 20 }) {
+  constructor({ ws, callId, sequenceRef, sampleRate = 8000, chunkMs = 20, onComplete }) {
     this.ws = ws;
     this.callId = callId;
     this.sequenceRef = sequenceRef;
@@ -17,6 +17,7 @@ export class ConversationEngine {
     this.waitingForWelcome = false;
     this.isUserSpeaking = false;
     this.varOrd = 0;
+    this.onComplete= onComplete;
     this.currentStepIndex = 0;
     this.hasSentFirstUserAudio = false;
     this.lastMediaTime = null;
@@ -180,6 +181,10 @@ export class ConversationEngine {
   _endCall() {
     if (this.ended) return;
     this.ended = true;
+
+    if (this.onComplete) {
+      this.onComplete(); // marks completed
+    }
 
     console.log("🔚 Ending call");
 
